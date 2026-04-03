@@ -1,0 +1,27 @@
+{
+    "flags": {
+        "basic-flag": {
+            "state": "ENABLED",
+            "variants": {
+                "true": true,
+                "false": false
+            },
+            "defaultVariant": null,
+            "targeting": {
+                "fractional": [
+                    {
+                        "var": "json"
+                    },
+                    [
+                        "true",
+                        1
+                    ],
+                    [
+                        "false",
+                        0
+                    ]
+                ]
+            }
+        }
+    }
+}

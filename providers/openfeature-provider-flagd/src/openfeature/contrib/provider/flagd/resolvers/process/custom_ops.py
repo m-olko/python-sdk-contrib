@@ -1,8 +1,10 @@
 import logging
+import os
 import typing
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+import cbor2
 import mmh3
 import semver
 
@@ -18,13 +20,13 @@ class Fraction:
     weight: int = 1
 
 
-def fractional(data: dict, *args: JsonLogicArg) -> str | None:
+def fractional(data: dict, *args: typing.Any) -> str | None:
     if not args:
         logger.error("No arguments provided to fractional operator.")
         return None
 
     bucket_by = None
-    if isinstance(args[0], str):
+    if not isinstance(args[0], (list, tuple)):
         bucket_by = args[0]
         args = args[1:]
     else:
@@ -35,12 +37,22 @@ def fractional(data: dict, *args: JsonLogicArg) -> str | None:
             return None
         bucket_by = seed + targeting_key
 
-    if not bucket_by:
+    if bucket_by is None:
         logger.error("No hashKey value resolved")
         return None
 
-    hash_ratio = abs(mmh3.hash(bucket_by)) / (2**31 - 1)
-    bucket = hash_ratio * 100
+    # New hashing logic using CBOR
+    bucket_by = normalize_numbers(bucket_by)
+    deterministic_cbor_bytes = cbor2.dumps(bucket_by, canonical=True)
+    hash_value = mmh3.hash(deterministic_cbor_bytes, signed=False)
+
+    # Invoke verification helper
+    if not verify_test(data, f"{hash_value:08x}", deterministic_cbor_bytes):
+        raise ValueError(f"Verification failed for test {data.get('id')}")
+
+    bucket = (hash_value / 4294967295.0) * 100
+
+    logger.debug(f"Bucket value for '{bucket_by}': {bucket}")
 
     total_weight = 0
     fractions = []
@@ -164,3 +176,63 @@ def parse_version(arg: typing.Any) -> semver.Version:
         version = version[1:]
 
     return semver.Version.parse(version)
+
+
+def normalize_numbers(data: typing.Any) -> typing.Any:
+    """
+    Recursively convert floats that have no fractional part into integers,
+    but only if they fit within the 64-bit signed integer range.
+    This ensures consistency for small integers (like 0.0 -> 0)
+    while avoiding converting massive floats into bignums, which
+    cause encoding differences.
+    """
+    if isinstance(data, dict):
+        return {k: normalize_numbers(v) for k, v in data.items()}
+    elif isinstance(data, list):
+        return [normalize_numbers(v) for v in data]
+    elif isinstance(data, float) and data.is_integer():
+        # Check if it fits in 64-bit signed integer range
+        if -(2**63) <= data <= 2**63 - 1:
+            return int(data)
+    return data
+
+
+def verify_test(data: dict, calculated_hash: str, calculated_cbor: bytes) -> bool:
+    """
+    Helper function to verify the CBOR encoding and hash for a test case.
+    Expects 'id' and 'path' to be present in the data (evaluation context)
+    to perform verification against files.
+    """
+    test_id = data.get("id")
+    test_path = data.get("path")
+
+    if test_id is None or test_path is None:
+        return True
+
+    hash_file = os.path.join(test_path, f"{test_id}.hash")
+    cbor_file = os.path.join(test_path, f"{test_id}.cbor")
+
+    if not os.path.exists(hash_file) or not os.path.exists(cbor_file):
+        return True
+
+    try:
+        with open(hash_file, "r") as f:
+            expected_hash = f.read().strip().strip('"')
+
+        with open(cbor_file, "rb") as f:
+            expected_cbor = f.read()
+
+        if calculated_hash != expected_hash:
+            print(
+                f"VERIFY_TEST FAIL: test {test_id}, hash mismatch: expected {expected_hash}, got {calculated_hash}"
+            )
+            return False
+
+        if calculated_cbor != expected_cbor:
+            print(f"VERIFY_TEST FAIL: test {test_id}, cbor mismatch")
+            return False
+
+        return True
+    except Exception as e:
+        print(f"VERIFY_TEST ERROR: test {test_id}, {e}")
+        return False
